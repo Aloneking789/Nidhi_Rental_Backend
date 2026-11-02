@@ -35,5 +35,5 @@ jobs:
       - name: Restart Backend & Worker
         run: |
           echo "Deploying at $(date '+%Y-%m-%d %H:%M:%S %Z')"
-          sudo pm2 restart Nidhi_Rental_Backend --update-env
+          sudo pm2 restart nidhi-rental-api --update-env
           sudo pm2 save
