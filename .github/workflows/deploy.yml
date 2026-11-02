@@ -1,0 +1,39 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync Backend Files
+        run: |
+          rsync -av --delete \
+            --exclude=node_modules \
+            --exclude=uploads \
+            --exclude=.git \
+            --exclude=.env \
+            $GITHUB_WORKSPACE/ \
+            /var/www/Nidhi_Rental_Backend/
+
+      - name: Install Dependencies
+        run: |
+          cd /var/www/Nidhi_Rental_Backend
+          # npm ci
+
+      - name: Generate Prisma Client
+        run: |
+          cd /var/www/Nidhi_Rental_Backend
+          npx prisma generate
+
+      - name: Restart Backend & Worker
+        run: |
+          echo "Deploying at $(date '+%Y-%m-%d %H:%M:%S %Z')"
+          sudo pm2 restart Nidhi_Rental_Backend --update-env
+          sudo pm2 save
