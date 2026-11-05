@@ -6,6 +6,8 @@
   "scripts": {
     "start": "tsx index.js",
     "dev": "tsx watch index.js",
+    "seed": "tsx prisma/seed.js",
+    "prisma:seed": "prisma db seed",
     "test": "node --check index.js"
   },
   "keywords": [],
