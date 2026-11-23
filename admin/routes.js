@@ -141,25 +141,13 @@ router.post('/bookings', async (req, res) => {
         throw routeError('Available vehicle not found', 404)
       }
 
-      const candidateBookings = await transaction.booking.findMany({
-        where: {
-          vehicleId,
-          startDate: { lte: bookingEnd },
-          endDate: { gte: bookingStart },
-          status: { notIn: ['CANCELLED', 'REFUNDED'] },
-        },
-        select: { bookingNumber: true, startDate: true, endDate: true, startTime: true, endTime: true },
-      })
-      const conflictingBooking = candidateBookings.find((candidate) => overlaps(requestedInterval, bookingInterval(candidate)))
       const candidateBlocks = await transaction.vehicleAvailability.findMany({
         where: { vehicleId, startAt: { lt: requestedInterval.end }, endAt: { gt: requestedInterval.start } },
         select: { reason: true, startAt: true, endAt: true },
       })
       const conflictingBlock = candidateBlocks.find((block) => overlaps(requestedInterval, block))
-      if (conflictingBooking || conflictingBlock) {
-        const description = conflictingBooking
-          ? `booking ${conflictingBooking.bookingNumber}`
-          : `availability block${conflictingBlock.reason ? ` (${conflictingBlock.reason})` : ''}`
+      if (conflictingBlock) {
+        const description = `availability block${conflictingBlock.reason ? ` (${conflictingBlock.reason})` : ''}`
         throw routeError(`Vehicle is not available because of an existing ${description}`, 409)
       }
 
@@ -316,7 +304,7 @@ router.get('/bookings', async (req, res) => {
     return res.status(400).json({ message: 'Invalid booking status or type' })
   }
   const [bookings, total] = await Promise.all([
-    prisma.booking.findMany({ where, skip: (page - 1) * pageSize, take: pageSize, include: bookingInclude(), orderBy: { createdAt: 'desc' } }),
+    prisma.booking.findMany({ where, skip: (page - 1) * pageSize, take: pageSize, include: bookingInclude(), orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] }),
     prisma.booking.count({ where }),
   ])
   return res.json({ bookings, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } })
@@ -491,7 +479,7 @@ router.get('/drivers', async (req, res) => {
 router.post('/drivers', async (req, res) => {
   const { name, phone, licenseNumber, vehicle, vehicleNumber, status = 'AVAILABLE' } = req.body
   if (!name || !phone || !licenseNumber || !driverStatuses.includes(status)) return res.status(400).json({ message: 'name, phone, licenseNumber and valid status are required' })
-  const driver = await prisma.driver.create({ data: { name, phone, licenseNumber, vehicle, vehicleNumber, status, initials: name.split(/\s+/).map((part) => part[0]).join('').slice(0, 3).toUpperCase() } })
+  const driver = await prisma.driver.create({ data: { name, phone, licenseNumber, vehicle, vehicleNumber: vehicleNumber || null, status, initials: name.split(/\s+/).map((part) => part[0]).join('').slice(0, 3).toUpperCase() } })
   return res.status(201).json({ driver })
 })
 

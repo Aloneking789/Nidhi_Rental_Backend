@@ -252,7 +252,16 @@ router.get('/:id', async (req, res) => {
     return res.status(404).json({ message: 'Vehicle not found' })
   }
 
-  return res.json({ vehicle: publicVehicle(vehicle) })
+  const reviews = vehicle.bookings
+    .flatMap(({ id, bookingNumber, review }) => review
+      ? [{
+        ...review,
+        booking: { id, bookingNumber, vehicleId: vehicle.id },
+      }]
+      : [])
+    .sort((first, second) => new Date(second.createdAt) - new Date(first.createdAt))
+
+  return res.json({ vehicle: publicVehicle({ ...vehicle, reviews }) })
 })
 
 router.post('/', requireAuth, requireAdmin, async (req, res) => {
