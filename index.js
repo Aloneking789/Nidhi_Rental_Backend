@@ -6,6 +6,7 @@ import userRoutes from './users/routes.js'
 import vehicleRoutes from './vehicles/routes.js'
 import bookingRoutes from './bookings/routes.js'
 import adminRoutes from './admin/routes.js'
+import supportRoutes from './support/routes.js'
 
 const app = express()
 const port = Number(process.env.PORT || 3000)
@@ -18,6 +19,7 @@ app.use('/api/auth', userRoutes)
 app.use('/api/vehicles', vehicleRoutes)
 app.use('/api/bookings', bookingRoutes)
 app.use('/api/admin', adminRoutes)
+app.use('/api/support-tickets', supportRoutes)
 
 app.use((error, _req, res, _next) => {
   console.error(error)

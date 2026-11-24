@@ -10,6 +10,8 @@ const router = Router()
 const bookingStatuses = ['PENDING', 'PAYMENT_PENDING', 'CONFIRMED', 'DRIVER_ASSIGNED', 'READY_FOR_PICKUP', 'ONGOING', 'COMPLETED', 'CANCELLED', 'REFUND_PENDING', 'REFUNDED']
 const changedByTypes = ['ADMIN', 'STAFF']
 const driverStatuses = ['AVAILABLE', 'ASSIGNED', 'ON_TRIP', 'OFFLINE', 'SUSPENDED']
+const supportTicketStatuses = ['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED']
+const supportCategories = ['BOOKING', 'PAYMENT', 'VEHICLE', 'DRIVER', 'REFUND', 'ACCOUNT', 'OTHER']
 const categories = ['SEDAN', 'SUV', 'LUXURY', 'MUV', 'HATCHBACK', 'TEMPO_TRAVELLER', 'BUS']
 const bookingTypes = ['HOURLY', 'DAILY', 'EVENT', 'OUTSTATION']
 const driverOptions = ['SELF_DRIVE', 'WITH_DRIVER']
@@ -327,6 +329,92 @@ router.get('/bookings', async (req, res) => {
     prisma.booking.count({ where }),
   ])
   return res.json({ bookings, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } })
+})
+
+router.get('/reviews', async (req, res) => {
+  const page = numberQuery(req.query.page, 1, 100000)
+  const pageSize = numberQuery(req.query.pageSize, 25, 100)
+  if (!page || !pageSize) return res.status(400).json({ message: 'page and pageSize must be positive integers' })
+
+  const [reviews, total] = await Promise.all([
+    prisma.review.findMany({
+      include: {
+        user: { select: { id: true, name: true } },
+        booking: {
+          select: {
+            id: true,
+            bookingNumber: true,
+            status: true,
+            vehicle: { select: { id: true, brand: true, name: true, model: true } },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.review.count(),
+  ])
+  return res.json({ reviews, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } })
+})
+
+router.get('/support-tickets', async (req, res) => {
+  const page = numberQuery(req.query.page, 1, 100000)
+  const pageSize = numberQuery(req.query.pageSize, 25, 100)
+  const { status, category } = req.query
+  if (!page || !pageSize) return res.status(400).json({ message: 'page and pageSize must be positive integers' })
+  if (status !== undefined && !supportTicketStatuses.includes(status)) {
+    return res.status(400).json({ message: 'Invalid support ticket status' })
+  }
+  if (category !== undefined && !supportCategories.includes(category)) {
+    return res.status(400).json({ message: 'Invalid support ticket category' })
+  }
+
+  const where = {
+    ...(status && { status }),
+    ...(category && { category }),
+  }
+  const [tickets, total] = await Promise.all([
+    prisma.supportTicket.findMany({
+      where,
+      include: {
+        user: { select: { id: true, name: true, email: true, phone: true } },
+        booking: { select: { id: true, bookingNumber: true, status: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.supportTicket.count({ where }),
+  ])
+  return res.json({ tickets, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } })
+})
+
+router.patch('/support-tickets/:id/resolve', async (req, res) => {
+  const { comment } = req.body
+  if (typeof comment !== 'string' || !comment.trim()) {
+    return res.status(400).json({ message: 'comment is required to resolve a support ticket' })
+  }
+
+  const ticket = await prisma.supportTicket.findUnique({ where: { id: req.params.id } })
+  if (!ticket) return res.status(404).json({ message: 'Support ticket not found' })
+  if (ticket.status === 'RESOLVED' || ticket.status === 'CLOSED') {
+    return res.status(409).json({ message: 'Support ticket is already resolved or closed' })
+  }
+
+  const updated = await prisma.supportTicket.update({
+    where: { id: ticket.id },
+    data: {
+      status: 'RESOLVED',
+      resolutionComment: comment.trim(),
+      resolvedAt: new Date(),
+    },
+    include: {
+      user: { select: { id: true, name: true, email: true, phone: true } },
+      booking: { select: { id: true, bookingNumber: true, status: true } },
+    },
+  })
+  return res.json({ ticket: updated })
 })
 
 router.get('/bookings/calendar', async (req, res) => {
