@@ -4,6 +4,7 @@ import { Prisma } from '../generated/prisma/client.js'
 import { prisma } from '../database/client.js'
 import { requireAdmin, requireAuth } from '../middleware/auth.js'
 import { parseBookingPricing } from './pricing.js'
+import { sendPushNotification } from '../notifications/push.js'
 
 const router = Router()
 const bookingPriceFields = [
@@ -162,8 +163,26 @@ router.post('/', requireAuth, async (req, res) => {
           changedById: req.user.id,
         },
       })
+      await transaction.notification.create({
+        data: {
+          userId: req.user.id,
+          category: 'BOOKING',
+          title: 'Booking received',
+          description: `Your booking ${created.bookingNumber} has been received.`,
+        },
+      })
       return created
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
+
+    try {
+      await sendPushNotification(req.user.id, {
+        title: 'Booking received',
+        body: `Your booking ${booking.bookingNumber} has been received.`,
+        data: { type: 'BOOKING_CREATED', bookingId: booking.id },
+      })
+    } catch (error) {
+      console.error(`Failed to send booking-created push for ${booking.id}:`, error)
+    }
 
     return res.status(201).json({ booking: customerBooking(booking) })
   } catch (error) {

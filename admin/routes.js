@@ -4,6 +4,7 @@ import { Prisma } from '../generated/prisma/client.js'
 import { prisma } from '../database/client.js'
 import { createToken, requireAdminOrStaff, requireAuth } from '../middleware/auth.js'
 import { parseBookingPricing } from '../bookings/pricing.js'
+import { sendPushNotification } from '../notifications/push.js'
 
 const router = Router()
 const bookingStatuses = ['PENDING', 'PAYMENT_PENDING', 'CONFIRMED', 'DRIVER_ASSIGNED', 'READY_FOR_PICKUP', 'ONGOING', 'COMPLETED', 'CANCELLED', 'REFUND_PENDING', 'REFUNDED']
@@ -214,9 +215,27 @@ router.post('/bookings', async (req, res) => {
           reason: 'Booked directly by admin or staff',
         },
       })
+      await transaction.notification.create({
+        data: {
+          userId: customerAccount.id,
+          category: 'BOOKING',
+          title: 'Booking confirmed',
+          description: `Your booking ${booking.bookingNumber} has been confirmed.`,
+        },
+      })
 
       return { booking, temporaryPassword }
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
+
+    try {
+      await sendPushNotification(result.booking.user.id, {
+        title: 'Booking confirmed',
+        body: `Your booking ${result.booking.bookingNumber} has been confirmed.`,
+        data: { type: 'BOOKING_CREATED', bookingId: result.booking.id },
+      })
+    } catch (error) {
+      console.error(`Failed to send booking-created push for ${result.booking.id}:`, error)
+    }
 
     return res.status(201).json({
       booking: result.booking,
@@ -372,14 +391,43 @@ router.patch('/bookings/:id/status', async (req, res) => {
       message: 'A positive vehicleRental and valid non-negative charges, taxes, discount, and advanceAmount are required to confirm a booking',
     })
   }
-  const booking = await prisma.$transaction(async (transaction) => {
+  const result = await prisma.$transaction(async (transaction) => {
     const current = await transaction.booking.findUnique({ where: { id: req.params.id } })
     if (!current) { const error = new Error('Booking not found'); error.statusCode = 404; throw error }
     const updated = await transaction.booking.update({ where: { id: current.id }, data: { status, ...(pricing || {}) }, include: bookingInclude() })
     await transaction.bookingStatusHistory.create({ data: { bookingId: current.id, fromStatus: current.status, toStatus: status, changedByType, changedById: req.user.id, reason } })
-    return updated
+    let completionNotification
+    if (status === 'COMPLETED' && current.status !== 'COMPLETED') {
+      const title = 'Booking completed'
+      const body = `Your booking ${current.bookingNumber} is complete. Please leave a review.`
+      await transaction.notification.create({
+        data: {
+          userId: current.userId,
+          category: 'BOOKING',
+          title,
+          description: body,
+        },
+      })
+      completionNotification = {
+        userId: current.userId,
+        title,
+        body,
+        data: { type: 'BOOKING_COMPLETED', bookingId: current.id },
+      }
+    }
+    return { booking: updated, completionNotification }
   })
-  return res.json({ booking })
+  if (result.completionNotification) {
+    try {
+      await sendPushNotification(
+        result.completionNotification.userId,
+        result.completionNotification,
+      )
+    } catch (error) {
+      console.error(`Failed to send booking-completed push for ${result.booking.id}:`, error)
+    }
+  }
+  return res.json({ booking: result.booking })
 })
 
 router.post('/bookings/:id/assign-driver', async (req, res) => {
