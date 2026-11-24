@@ -291,8 +291,8 @@ router.get('/analytics/live-feed', async (_req, res) => {
 })
 
 router.get('/bookings', async (req, res) => {
-  const page = numberQuery(req.query.page, 1, 100000)
-  const pageSize = numberQuery(req.query.pageSize, 25, 100)
+  const page = Number(req.query.page)
+  const pageSize = Number(req.query.pageSize)
   if (!page || !pageSize) return res.status(400).json({ message: 'page and pageSize must be positive integers' })
   const { status, search, type } = req.query
   const where = {
