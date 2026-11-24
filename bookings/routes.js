@@ -3,8 +3,31 @@ import { Router } from 'express'
 import { Prisma } from '../generated/prisma/client.js'
 import { prisma } from '../database/client.js'
 import { requireAdmin, requireAuth } from '../middleware/auth.js'
+import { parseBookingPricing } from './pricing.js'
 
 const router = Router()
+const bookingPriceFields = [
+  'vehicleRental', 'driverCharges', 'taxes', 'discount', 'totalAmount', 'advanceAmount', 'remainingAmount',
+]
+
+function publicVehicle(vehicle) {
+  if (!vehicle) return vehicle
+  const safeVehicle = { ...vehicle }
+  delete safeVehicle.hourlyPrice
+  delete safeVehicle.dailyPrice
+  delete safeVehicle.eventPrice
+  delete safeVehicle.outstationPrice
+  return safeVehicle
+}
+
+function customerBooking(booking) {
+  const hasConfirmedPrice = booking.status !== 'PENDING' && booking.totalAmount > 0
+  return {
+    ...booking,
+    ...(!hasConfirmedPrice && Object.fromEntries(bookingPriceFields.map((field) => [field, null]))),
+    ...(booking.vehicle && { vehicle: publicVehicle(booking.vehicle) }),
+  }
+}
 
 function isValidRating(value) {
   return Number.isInteger(value) && value >= 1 && value <= 5
@@ -74,36 +97,17 @@ router.post('/', requireAuth, async (req, res) => {
         throw error
       }
 
-      const candidateBookings = await transaction.booking.findMany({
-        where: {
-          vehicleId,
-          startDate: { lte: bookingEnd },
-          endDate: { gte: bookingStart },
-          status: { notIn: ['CANCELLED', 'REFUNDED'] },
-        },
-        select: { bookingNumber: true, startDate: true, endDate: true, startTime: true, endTime: true },
-      })
-      const conflictingBooking = candidateBookings.find((candidate) => overlaps(requestedInterval, bookingInterval(candidate)))
       const candidateBlocks = await transaction.vehicleAvailability.findMany({
         where: { vehicleId, startAt: { lt: requestedInterval.end }, endAt: { gt: requestedInterval.start } },
         select: { startAt: true, endAt: true, reason: true },
       })
       const conflictingBlock = candidateBlocks.find((block) => overlaps(requestedInterval, block))
-      if (conflictingBooking || conflictingBlock) {
-        const description = conflictingBooking
-          ? `booking ${conflictingBooking.bookingNumber}`
-          : `availability block${conflictingBlock.reason ? ` (${conflictingBlock.reason})` : ''}`
+      if (conflictingBlock) {
+        const description = `availability block${conflictingBlock.reason ? ` (${conflictingBlock.reason})` : ''}`
         const error = new Error(`Vehicle is not available for these times because of an existing ${description}`)
         error.statusCode = 409
         throw error
       }
-
-      const vehicleRental = bookingType === 'HOURLY'
-        ? (vehicle.hourlyPrice || 0) * (durationHours || 1)
-        : vehicle.dailyPrice || 0
-      const driverCharges = driverOption === 'WITH_DRIVER' ? 0 : 0
-      const taxes = 0
-      const totalAmount = vehicleRental + driverCharges + taxes
 
       const created = await transaction.booking.create({
         data: {
@@ -120,12 +124,12 @@ router.post('/', requireAuth, async (req, res) => {
           pickupLocationJson: pickupLocation,
           dropLocationJson: dropLocation,
           purpose,
-          vehicleRental,
-          driverCharges,
-          taxes,
-          totalAmount,
+          vehicleRental: 0,
+          driverCharges: 0,
+          taxes: 0,
+          totalAmount: 0,
           advanceAmount: 0,
-          remainingAmount: totalAmount,
+          remainingAmount: 0,
           status: 'PENDING',
         },
         include: { vehicle: true },
@@ -142,7 +146,7 @@ router.post('/', requireAuth, async (req, res) => {
       return created
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
 
-    return res.status(201).json({ booking })
+    return res.status(201).json({ booking: customerBooking(booking) })
   } catch (error) {
     if (error.statusCode) {
       return res.status(error.statusCode).json({ message: error.message })
@@ -157,10 +161,25 @@ router.post('/', requireAuth, async (req, res) => {
 router.get('/mine', requireAuth, async (req, res) => {
   const bookings = await prisma.booking.findMany({
     where: { userId: req.user.id },
-    include: { vehicle: true, statusHistory: { orderBy: { createdAt: 'asc' } } },
+    include: {
+      vehicle: true,
+      driver: {
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          initials: true,
+          rating: true,
+          tripCount: true,
+          vehicle: true,
+          vehicleNumber: true,
+        },
+      },
+      statusHistory: { orderBy: { createdAt: 'asc' } },
+    },
     orderBy: { createdAt: 'desc' },
   })
-  return res.json({ bookings })
+  return res.json({ bookings: bookings.map(customerBooking) })
 })
 
 router.get('/reviews', async (req, res) => {
@@ -174,7 +193,14 @@ router.get('/reviews', async (req, res) => {
     where: { booking: { vehicleId } },
     include: {
       user: { select: { id: true, name: true } },
-      booking: { select: { id: true, bookingNumber: true, vehicleId: true } },
+      booking: {
+        select: {
+          id: true,
+          bookingNumber: true,
+          vehicleId: true,
+          vehicle: { select: { id: true, brand: true, name: true, model: true } },
+        },
+      },
     },
     orderBy: { createdAt: 'desc' },
   })
@@ -238,7 +264,7 @@ router.get('/:id', requireAuth, async (req, res) => {
     return res.status(403).json({ message: 'You are not allowed to view this booking' })
   }
 
-  return res.json({ booking })
+  return res.json({ booking: req.user.role === 'ADMIN' ? booking : customerBooking(booking) })
 })
 
 router.post('/:id/review', requireAuth, async (req, res) => {
@@ -349,7 +375,7 @@ router.post('/:id/cancel', requireAuth, async (req, res) => {
     })
   })
 
-  return res.json({ booking })
+  return res.json({ booking: customerBooking(booking) })
 })
 
 router.get('/:id/review', async (req, res) => {
@@ -393,6 +419,13 @@ router.get('/admin', requireAuth, requireAdmin, async (req, res) => {
 })
 
 router.patch('/:id/confirm', requireAuth, requireAdmin, async (req, res) => {
+  const pricing = parseBookingPricing(req.body?.pricing ?? req.body)
+  if (!pricing) {
+    return res.status(400).json({
+      message: 'A positive vehicleRental and valid non-negative charges, taxes, discount, and advanceAmount are required',
+    })
+  }
+
   const booking = await prisma.$transaction(async (transaction) => {
     const current = await transaction.booking.findUnique({ where: { id: req.params.id } })
     if (!current) {
@@ -400,26 +433,40 @@ router.patch('/:id/confirm', requireAuth, requireAdmin, async (req, res) => {
       error.statusCode = 404
       throw error
     }
-    if (current.status !== 'PENDING') {
-      const error = new Error('Only pending bookings can be confirmed')
+    if (!['PENDING', 'CONFIRMED'].includes(current.status)) {
+      const error = new Error('Only pending or confirmed bookings can be priced')
       error.statusCode = 409
       throw error
+    }
+    const priceChanged = Object.keys(pricing).some((field) => current[field] !== pricing[field])
+    if (current.status === 'CONFIRMED' && priceChanged) {
+      const successfulPayment = await transaction.payment.findFirst({
+        where: { bookingId: current.id, status: 'SUCCEEDED' },
+        select: { id: true },
+      })
+      if (successfulPayment) {
+        const error = new Error('Price cannot be changed after a successful payment')
+        error.statusCode = 409
+        throw error
+      }
     }
 
     const updated = await transaction.booking.update({
       where: { id: current.id },
-      data: { status: 'CONFIRMED' },
+      data: { ...pricing, ...(current.status === 'PENDING' && { status: 'CONFIRMED' }) },
       include: { user: true, vehicle: true },
     })
-    await transaction.bookingStatusHistory.create({
-      data: {
-        bookingId: current.id,
-        fromStatus: current.status,
-        toStatus: 'CONFIRMED',
-        changedByType: 'ADMIN',
-        changedById: req.user.id,
-      },
-    })
+    if (current.status === 'PENDING') {
+      await transaction.bookingStatusHistory.create({
+        data: {
+          bookingId: current.id,
+          fromStatus: current.status,
+          toStatus: 'CONFIRMED',
+          changedByType: 'ADMIN',
+          changedById: req.user.id,
+        },
+      })
+    }
     return updated
   })
 
