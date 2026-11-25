@@ -17,6 +17,14 @@ function publicVehicle(vehicle) {
   return safeVehicle
 }
 
+function vehicleReviewSummary(reviews) {
+  const reviewCount = reviews.length
+  const average = reviewCount
+    ? reviews.reduce((total, review) => total + review.vehicleRating, 0) / reviewCount
+    : 0
+  return { rating: Number(average.toFixed(2)), reviewCount }
+}
+
 function parseDay(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null
   const day = new Date(`${value}T00:00:00.000Z`)
@@ -35,6 +43,8 @@ router.get('/', async (req, res) => {
     fuelType,
     ac,
     luggage,
+    hourlyPrice,
+    dailyPrice,
     minLuggage,
     maxLuggage,
     available,
@@ -94,9 +104,39 @@ router.get('/', async (req, res) => {
 
   const vehicles = await prisma.vehicle.findMany({
     where,
+    include: {
+      bookings: {
+        where: { review: { isNot: null } },
+        select: {
+          id: true,
+          bookingNumber: true,
+          review: {
+            select: {
+              id: true,
+              vehicleRating: true,
+              driverRating: true,
+              serviceRating: true,
+              comment: true,
+              createdAt: true,
+              updatedAt: true,
+              user: { select: { id: true, name: true } },
+            },
+          },
+        },
+      },
+    },
     orderBy: { createdAt: 'desc' },
   })
-  return res.json({ vehicles: vehicles.map(publicVehicle) })
+  return res.json({
+    vehicles: vehicles.map(({ bookings, ...vehicle }) => {
+      const reviews = bookings
+        .flatMap(({ id, bookingNumber, review }) => review
+          ? [{ ...review, booking: { id, bookingNumber, vehicleId: vehicle.id } }]
+          : [])
+        .sort((first, second) => new Date(second.createdAt) - new Date(first.createdAt))
+      return publicVehicle({ ...vehicle, ...vehicleReviewSummary(reviews), reviews })
+    }),
+  })
 })
 
 router.get('/:id/availability', async (req, res) => {
@@ -261,7 +301,9 @@ router.get('/:id', async (req, res) => {
       : [])
     .sort((first, second) => new Date(second.createdAt) - new Date(first.createdAt))
 
-  return res.json({ vehicle: publicVehicle({ ...vehicle, reviews }) })
+  return res.json({
+    vehicle: publicVehicle({ ...vehicle, ...vehicleReviewSummary(reviews), reviews }),
+  })
 })
 
 router.post('/', requireAuth, requireAdmin, async (req, res) => {

@@ -4,6 +4,7 @@ import { Prisma } from '../generated/prisma/client.js'
 import { prisma } from '../database/client.js'
 import { requireAdmin, requireAuth } from '../middleware/auth.js'
 import { parseBookingPricing } from './pricing.js'
+import { sendPushNotification } from '../notifications/push.js'
 
 const router = Router()
 const bookingPriceFields = [
@@ -41,6 +42,25 @@ function reviewResponse(review) {
       name: review.user.name,
     } : undefined,
   }
+}
+
+async function updateVehicleReviewSummary(transaction, vehicleId) {
+  const aggregate = await transaction.review.aggregate({
+    where: { booking: { vehicleId } },
+    _avg: { vehicleRating: true },
+    _count: { _all: true },
+  })
+  const reviewCount = aggregate._count._all
+  const rating = reviewCount
+    ? Number((aggregate._avg.vehicleRating ?? 0).toFixed(2))
+    : 0
+
+  await transaction.vehicle.update({
+    where: { id: vehicleId },
+    data: { rating, reviewCount },
+  })
+
+  return { id: vehicleId, rating, reviewCount }
 }
 
 function dateWithTime(date, time, fallbackHour = 0) {
@@ -143,8 +163,26 @@ router.post('/', requireAuth, async (req, res) => {
           changedById: req.user.id,
         },
       })
+      await transaction.notification.create({
+        data: {
+          userId: req.user.id,
+          category: 'BOOKING',
+          title: 'Booking received',
+          description: `Your booking ${created.bookingNumber} has been received.`,
+        },
+      })
       return created
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
+
+    try {
+      await sendPushNotification(req.user.id, {
+        title: 'Booking received',
+        body: `Your booking ${booking.bookingNumber} has been received.`,
+        data: { type: 'BOOKING_CREATED', bookingId: booking.id },
+      })
+    } catch (error) {
+      console.error(`Failed to send booking-created push for ${booking.id}:`, error)
+    }
 
     return res.status(201).json({ booking: customerBooking(booking) })
   } catch (error) {
@@ -252,6 +290,18 @@ router.get('/:id', requireAuth, async (req, res) => {
     where: { id: req.params.id },
     include: {
       vehicle: true,
+      driver: {
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          initials: true,
+          rating: true,
+          tripCount: true,
+          vehicle: true,
+          vehicleNumber: true,
+        },
+      },
       statusHistory: { orderBy: { createdAt: 'asc' } },
       review: true,
     },
@@ -300,22 +350,38 @@ router.post('/:id/review', requireAuth, async (req, res) => {
     return res.status(409).json({ message: 'A review already exists for this booking' })
   }
 
-  const review = await prisma.review.create({
-    data: {
-      bookingId: booking.id,
-      userId: req.user.id,
-      vehicleRating,
-      driverRating: driverRating ?? null,
-      serviceRating,
-      comment: comment ?? null,
-    },
-    include: {
-      user: { select: { id: true, name: true } },
-      booking: { select: { id: true, bookingNumber: true, vehicleId: true } },
-    },
+  const result = await prisma.$transaction(async (transaction) => {
+    const review = await transaction.review.create({
+      data: {
+        bookingId: booking.id,
+        userId: req.user.id,
+        vehicleRating,
+        driverRating: driverRating ?? null,
+        serviceRating,
+        comment: comment ?? null,
+      },
+      include: {
+        user: { select: { id: true, name: true } },
+        booking: { select: { id: true, bookingNumber: true, vehicleId: true } },
+      },
+    })
+    const vehicle = await updateVehicleReviewSummary(transaction, booking.vehicleId)
+    const reviews = await transaction.review.findMany({
+      where: { booking: { vehicleId: booking.vehicleId } },
+      include: {
+        user: { select: { id: true, name: true } },
+        booking: { select: { id: true, bookingNumber: true, vehicleId: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    })
+
+    return { review, vehicle, reviews }
   })
 
-  return res.status(201).json({ review: reviewResponse(review) })
+  return res.status(201).json({
+    review: reviewResponse(result.review),
+    vehicle: { ...result.vehicle, reviews: result.reviews.map(reviewResponse) },
+  })
 })
 
 router.post('/:id/cancel', requireAuth, async (req, res) => {
@@ -370,6 +436,18 @@ router.post('/:id/cancel', requireAuth, async (req, res) => {
       where: { id: current.id },
       include: {
         vehicle: true,
+        driver: {
+          select: {
+            id: true,
+            name: true,
+            phone: true,
+            initials: true,
+            rating: true,
+            tripCount: true,
+            vehicle: true,
+            vehicleNumber: true,
+          },
+        },
         statusHistory: { orderBy: { createdAt: 'asc' } },
       },
     })
@@ -397,6 +475,7 @@ router.get('/:id/review', async (req, res) => {
 router.delete('/:id/review', requireAuth, async (req, res) => {
   const review = await prisma.review.findUnique({
     where: { bookingId: req.params.id },
+    include: { booking: { select: { vehicleId: true } } },
   })
 
   if (!review) {
@@ -406,8 +485,11 @@ router.delete('/:id/review', requireAuth, async (req, res) => {
     return res.status(403).json({ message: 'Only the review owner or an admin can delete this review' })
   }
 
-  await prisma.review.delete({ where: { id: review.id } })
-  return res.json({ message: 'Review deleted successfully' })
+  const vehicle = await prisma.$transaction(async (transaction) => {
+    await transaction.review.delete({ where: { id: review.id } })
+    return updateVehicleReviewSummary(transaction, review.booking.vehicleId)
+  })
+  return res.json({ message: 'Review deleted successfully', vehicle })
 })
 
 router.get('/admin', requireAuth, requireAdmin, async (req, res) => {
