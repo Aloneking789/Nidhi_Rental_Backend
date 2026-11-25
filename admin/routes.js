@@ -2,9 +2,9 @@ import { Router } from 'express'
 import { randomInt, randomUUID } from 'node:crypto'
 import { Prisma } from '../generated/prisma/client.js'
 import { prisma } from '../database/client.js'
-import { createToken, requireAdminOrStaff, requireAuth } from '../middleware/auth.js'
+import { createToken, requireAdmin, requireAdminOrStaff, requireAuth } from '../middleware/auth.js'
 import { parseBookingPricing } from '../bookings/pricing.js'
-import { sendPushNotification } from '../notifications/push.js'
+import { sendBroadcastPushNotification, sendPushNotification } from '../notifications/push.js'
 
 const router = Router()
 const bookingStatuses = ['PENDING', 'PAYMENT_PENDING', 'CONFIRMED', 'DRIVER_ASSIGNED', 'READY_FOR_PICKUP', 'ONGOING', 'COMPLETED', 'CANCELLED', 'REFUND_PENDING', 'REFUNDED']
@@ -12,6 +12,7 @@ const changedByTypes = ['ADMIN', 'STAFF']
 const driverStatuses = ['AVAILABLE', 'ASSIGNED', 'ON_TRIP', 'OFFLINE', 'SUSPENDED']
 const supportTicketStatuses = ['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED']
 const supportCategories = ['BOOKING', 'PAYMENT', 'VEHICLE', 'DRIVER', 'REFUND', 'ACCOUNT', 'OTHER']
+const notificationCategories = ['BOOKING', 'PAYMENT', 'DRIVER', 'PROMOTION', 'SYSTEM', 'REFUND']
 const categories = ['SEDAN', 'SUV', 'LUXURY', 'MUV', 'HATCHBACK', 'TEMPO_TRAVELLER', 'BUS']
 const bookingTypes = ['HOURLY', 'DAILY', 'EVENT', 'OUTSTATION']
 const driverOptions = ['SELF_DRIVE', 'WITH_DRIVER']
@@ -356,6 +357,64 @@ router.get('/reviews', async (req, res) => {
     prisma.review.count(),
   ])
   return res.json({ reviews, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } })
+})
+
+router.post('/notifications/broadcast', requireAdmin, async (req, res) => {
+  const request = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {}
+  const { title, body, category = 'SYSTEM', deepLink } = request
+  if (typeof title !== 'string' || !title.trim() || typeof body !== 'string' || !body.trim()) {
+    return res.status(400).json({ message: 'title and body are required' })
+  }
+  if (!notificationCategories.includes(category)) {
+    return res.status(400).json({ message: 'Invalid notification category' })
+  }
+  if (deepLink !== undefined && deepLink !== null && typeof deepLink !== 'string') {
+    return res.status(400).json({ message: 'deepLink must be a string' })
+  }
+
+  const notification = {
+    title: title.trim(),
+    body: body.trim(),
+    category,
+    deepLink: deepLink?.trim() || null,
+  }
+  const recipients = await prisma.$transaction(async (transaction) => {
+    const users = await transaction.user.findMany({
+      where: { role: 'USER', status: 'ACTIVE' },
+      select: { id: true },
+    })
+    for (let offset = 0; offset < users.length; offset += 500) {
+      await transaction.notification.createMany({
+        data: users.slice(offset, offset + 500).map((user) => ({
+          userId: user.id,
+          category: notification.category,
+          title: notification.title,
+          description: notification.body,
+          deepLink: notification.deepLink,
+        })),
+      })
+    }
+    return users.length
+  })
+
+  let pushDelivery
+  try {
+    const devices = await sendBroadcastPushNotification({
+      title: notification.title,
+      body: notification.body,
+      data: { type: 'BROADCAST', category: notification.category, deepLink: notification.deepLink },
+    })
+    pushDelivery = { status: devices ? 'SENT' : 'NO_ACTIVE_DEVICES', accepted: devices }
+  } catch (error) {
+    console.error('Failed to send broadcast push notification:', error)
+    pushDelivery = { status: 'FAILED', message: error.message }
+  }
+
+  return res.status(201).json({
+    message: 'Broadcast notification created',
+    recipients,
+    pushDelivery,
+  })
 })
 
 router.get('/support-tickets', async (req, res) => {
