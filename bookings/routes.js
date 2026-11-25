@@ -97,6 +97,9 @@ router.post('/', requireAuth, async (req, res) => {
   if (!vehicleId || !startDate || !endDate || !pickupLocation || !dropLocation) {
     return res.status(400).json({ message: 'vehicleId, startDate, endDate, pickupLocation and dropLocation are required' })
   }
+  if (typeof req.user.id !== 'string' || !req.user.id) {
+    return res.status(401).json({ message: 'Your session is no longer valid. Please sign in again.' })
+  }
 
   const bookingStart = new Date(startDate)
   const bookingEnd = new Date(endDate)
@@ -110,6 +113,16 @@ router.post('/', requireAuth, async (req, res) => {
 
   try {
     const booking = await prisma.$transaction(async (transaction) => {
+      const user = await transaction.user.findUnique({
+        where: { id: req.user.id },
+        select: { id: true, status: true },
+      })
+      if (!user || user.status !== 'ACTIVE') {
+        const error = new Error('Your session is no longer valid. Please sign in again.')
+        error.statusCode = 401
+        throw error
+      }
+
       const vehicle = await transaction.vehicle.findUnique({ where: { id: vehicleId } })
       if (!vehicle || !vehicle.available) {
         const error = new Error('Available vehicle not found')
@@ -191,6 +204,10 @@ router.post('/', requireAuth, async (req, res) => {
     }
     if (error.code === 'P2034') {
       return res.status(409).json({ message: 'The vehicle was booked concurrently. Please choose another vehicle or retry.' })
+    }
+    if (error.code === 'P2003'
+      && (error.meta?.field_name === 'bookings_userId_fkey' || error.message?.includes('bookings_userId_fkey'))) {
+      return res.status(401).json({ message: 'Your session is no longer valid. Please sign in again.' })
     }
     throw error
   }
