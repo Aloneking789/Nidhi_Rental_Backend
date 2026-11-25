@@ -2,12 +2,8 @@ import { prisma } from '../database/client.js'
 
 const expoPushUrl = 'https://exp.host/--/api/v2/push/send'
 
-export async function sendPushNotification(userId, { title, body, data }) {
-  const devices = await prisma.device.findMany({
-    where: { userId, isActive: true, pushToken: { not: null } },
-    select: { id: true, pushToken: true },
-  })
-
+async function sendToDevices(devices, { title, body, data }) {
+  let accepted = 0
   for (let offset = 0; offset < devices.length; offset += 100) {
     const batch = devices.slice(offset, offset + 100)
     const response = await fetch(expoPushUrl, {
@@ -36,7 +32,9 @@ export async function sendPushNotification(userId, { title, body, data }) {
 
     const failures = []
     for (const [index, ticket] of result.data.entries()) {
-      if (ticket.status === 'error') {
+      if (ticket?.status === 'ok') {
+        accepted += 1
+      } else if (ticket?.status === 'error') {
         if (ticket.details?.error === 'DeviceNotRegistered') {
           await prisma.device.update({
             where: { id: batch[index].id },
@@ -44,6 +42,8 @@ export async function sendPushNotification(userId, { title, body, data }) {
           })
         }
         failures.push(ticket.message || 'Unknown Expo push error')
+      } else {
+        failures.push('Expo push service returned an invalid ticket')
       }
     }
 
@@ -51,4 +51,27 @@ export async function sendPushNotification(userId, { title, body, data }) {
       throw new Error(`Expo push delivery failed: ${failures.join('; ')}`)
     }
   }
+  return accepted
+}
+
+export async function sendPushNotification(userId, notification) {
+  const devices = await prisma.device.findMany({
+    where: { userId, isActive: true, pushToken: { not: null } },
+    select: { id: true, pushToken: true },
+  })
+
+  return sendToDevices(devices, notification)
+}
+
+export async function sendBroadcastPushNotification(notification) {
+  const devices = await prisma.device.findMany({
+    where: {
+      isActive: true,
+      pushToken: { not: null },
+      user: { is: { role: 'USER', status: 'ACTIVE' } },
+    },
+    select: { id: true, pushToken: true },
+  })
+
+  return sendToDevices(devices, notification)
 }
